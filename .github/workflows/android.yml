@@ -33,21 +33,30 @@ jobs:
         echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
         echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
 
-    - name: Download sse2neon for ARM SIMD Translation
+    - name: Download SIMDe for ARM AVX2 Translation
       run: |
-        curl -sSL https://raw.githubusercontent.com/DLTcollab/sse2neon/master/sse2neon.h -o src/sse2neon.h
-        # Patch simd.h to include sse2neon if compiling for ARM
-        sed -i 's/#include <immintrin.h>/#if defined(__aarch64__) || defined(_M_ARM64)\n#include "sse2neon.h"\n#else\n#include <immintrin.h>\n#endif/g' src/simd.h
+        git clone https://github.com/simd-everywhere/simde.git src/simde
+        
+        # Patch simd.h to use SIMDe when compiling for ARM64
+        sed -i 's|#include <immintrin.h>|#if defined(__aarch64__) || defined(_M_ARM64)\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#else\n#include <immintrin.h>\n#endif|g' src/simd.h
+
+    - name: Patch Makefile (Fix NDK Cross-Compilation)
+      run: |
+        # Prevent the Makefile from running -march=native in its property detection shell script
+        sed -i 's/-march=native//g' Makefile
+        sed -i 's/ARCH_DETECTED =/ARCH_DETECTED = NONE/g' Makefile
 
     - name: Compile Spaghet for Android (aarch64)
       run: |
         export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
         
-        # Build using NDK Clang with ARM neon/simd flags
+        # Build using NDK Clang. 
+        # We define USE_SIMD and USE_AVX2 to trigger Spaghet's AVX2 code, which SIMDe translates to NEON.
         make \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           NATIVE="-march=armv8-a+fp+simd" \
-          CXXFLAGS="-O3 -flto -fno-exceptions -std=c++20 -DNDEBUG -DUSE_SIMD -DUSE_AVX2 -DVALFILE=\\\"master0002.bin\\\"" \
+          CXXFLAGS="-O3 -flto -fno-exceptions -std=c++20 -DNDEBUG -DUSE_SIMD -DUSE_AVX2 -DEVALFILE=\\\"master0002.bin\\\" -I./src" \
+          LDFLAGS="-fuse-ld=lld -static-libstdc++" \
           EXE=spaghet-android-arm64
 
     - name: Bench via QEMU
