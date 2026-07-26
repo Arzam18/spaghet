@@ -1,0 +1,72 @@
+name: Spaghet Android Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Spaghet Android (aarch64)
+    runs-on: ubuntu-24.04
+    steps:
+
+    - name: Clone Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Android NDK & QEMU Environment
+      run: |
+        sudo apt update && sudo apt install -y qemu-user
+        NDKV="27.2.12479018"
+        ANDROID_ROOT=/usr/local/lib/android
+        ANDROID_SDK_ROOT=$ANDROID_ROOT/sdk
+        SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
+        echo "y" | $SDKMANAGER "ndk;$NDKV"
+        ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDKV
+        ANDROID_NDK_BIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+        
+        # Set NDK Toolchain Environment Variables
+        echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
+        echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
+
+    - name: Download sse2neon for ARM SIMD Translation
+      run: |
+        curl -sSL https://raw.githubusercontent.com/DLTcollab/sse2neon/master/sse2neon.h -o src/sse2neon.h
+        # Patch simd.h to include sse2neon if compiling for ARM
+        sed -i 's/#include <immintrin.h>/#if defined(__aarch64__) || defined(_M_ARM64)\n#include "sse2neon.h"\n#else\n#include <immintrin.h>\n#endif/g' src/simd.h
+
+    - name: Compile Spaghet for Android (aarch64)
+      run: |
+        export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
+        
+        # Build using NDK Clang with ARM neon/simd flags
+        make \
+          CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
+          NATIVE="-march=armv8-a+fp+simd" \
+          CXXFLAGS="-O3 -flto -fno-exceptions -std=c++20 -DNDEBUG -DUSE_SIMD -DUSE_AVX2 -DVALFILE=\\\"master0002.bin\\\"" \
+          EXE=spaghet-android-arm64
+
+    - name: Bench via QEMU
+      run: |
+        qemu-aarch64 ./spaghet-android-arm64 bench
+
+    - name: Upload Binary Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: spaghet-android-arm64
+        path: ./spaghet-android-arm64
+
+    - name: Create GitHub Prerelease
+      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: android-build-${{ github.run_number }}
+        name: Spaghet Android Build ${{ github.run_number }}
+        prerelease: true
+        files: ./spaghet-android-arm64
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
