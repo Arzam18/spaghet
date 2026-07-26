@@ -37,8 +37,8 @@ jobs:
       run: |
         git clone https://github.com/simd-everywhere/simde.git src/simde
         
-        # Patch simd.h to use SIMDe when compiling for ARM64
-        sed -i 's|#include <immintrin.h>|#if defined(__aarch64__) || defined(_M_ARM64)\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#else\n#include <immintrin.h>\n#endif|g' src/simd.h
+        # Patch simd.h to use SIMDe when compiling for ARM64 (using @ as the delimiter to avoid || conflicts)
+        sed -i 's@#include <immintrin.h>@#if defined(__aarch64__) || defined(_M_ARM64)\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#else\n#include <immintrin.h>\n#endif@g' src/simd.h
 
     - name: Patch Makefile (Fix NDK Cross-Compilation)
       run: |
