@@ -33,12 +33,20 @@ jobs:
         echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
         echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
 
-    - name: Download SIMDe for ARM AVX2 Translation
+    - name: Download SIMDe and Fix Header Collisions
       run: |
-        git clone https://github.com/simd-everywhere/simde.git src/simde
+        # 1. Download SIMDe and place it directly inside src/ so relative includes work natively
+        git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
+        mv simde-repo/simde src/simde
         
-        # Patch simd.h to use SIMDe when compiling for ARM64 (using @ as the delimiter to avoid || conflicts)
+        # 2. Patch simd.h to use SIMDe when compiling for ARM64
         sed -i 's@#include <immintrin.h>@#if defined(__aarch64__) || defined(_M_ARM64)\n#define SIMDE_ENABLE_NATIVE_ALIASES\n#include "simde/x86/avx2.h"\n#else\n#include <immintrin.h>\n#endif@g' src/simd.h
+
+        # 3. Fix Android NDK <time.h> collision
+        # Spaghet's src/time.h conflicts with the C standard library's <time.h>. 
+        # We rename it to timeman.h to prevent hijacking the NDK headers.
+        mv src/time.h src/timeman.h
+        find src -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's/"time.h"/"timeman.h"/g' {} +
 
     - name: Patch Makefile (Fix NDK Cross-Compilation)
       run: |
@@ -51,11 +59,10 @@ jobs:
         export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
         
         # Build using NDK Clang. 
-        # We define USE_SIMD and USE_AVX2 to trigger Spaghet's AVX2 code, which SIMDe translates to NEON.
         make \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           NATIVE="-march=armv8-a+fp+simd" \
-          CXXFLAGS="-O3 -flto -fno-exceptions -std=c++20 -DNDEBUG -DUSE_SIMD -DUSE_AVX2 -DEVALFILE=\\\"master0002.bin\\\" -I./src" \
+          CXXFLAGS="-O3 -flto -fno-exceptions -std=c++20 -DNDEBUG -DUSE_SIMD -DUSE_AVX2 -DEVALFILE=\\\"master0002.bin\\\"" \
           LDFLAGS="-fuse-ld=lld -static-libstdc++" \
           EXE=spaghet-android-arm64
 
