@@ -64,12 +64,11 @@ jobs:
         find src -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's/std::jthread/compat::jthread/g' {} +
         sed -i '1i #include "jthread_polyfill.h"' src/threads.h
 
-        # 2. Fix C++20 incomplete type constraint by moving ThreadManager implementation into threads.cpp
-        # First, remove our previous experimental append from search.h if it exists
-        sed -i '/ThreadManager::ThreadManager/d' src/search.h || true
-        sed -i '/ThreadManager::~ThreadManager/d' src/search.h || true
+        # 2. Fix C++20 incomplete type constraint by moving ThreadManager implementation out-of-line
+        # Remove the inline constructor from threads.h
+        perl -0777 -pi -e 's/ThreadManager\s*\(\)\s*:\s*thread_data\(options\.threads\)\s*\{\}/ThreadManager();\n    ~ThreadManager();/g' src/threads.h
 
-        # Now, define the constructor/destructor properly inside threads.cpp where both Searcher and ThreadManager are fully known
+        # Append the out-of-line constructor/destructor to threads.cpp where Searcher is fully defined
         cat << 'EOF' >> src/threads.cpp
 
         ThreadManager::ThreadManager() : thread_data(options.threads) {}
