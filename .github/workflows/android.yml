@@ -39,6 +39,7 @@ jobs:
 
     - name: Apply Android C++ Polyfills & Patches
       run: |
+        # 1. Inject std::jthread polyfill for Android's incomplete libc++ support
         cat << 'EOF' > src/jthread_polyfill.h
         #pragma once
         #include <thread>
@@ -63,8 +64,17 @@ jobs:
         find src -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's/std::jthread/compat::jthread/g' {} +
         sed -i '1i #include "jthread_polyfill.h"' src/threads.h
 
-        perl -0777 -pi -e 's/ThreadManager\s*\(\)\s*:\s*thread_data\(options\.threads\)\s*\{\}/ThreadManager();\n    ~ThreadManager();/g' src/threads.h
-        echo -e '\ninline ThreadManager::ThreadManager() : thread_data(options.threads) {}\ninline ThreadManager::~ThreadManager() = default;' >> src/search.h
+        # 2. Fix C++20 incomplete type constraint by moving ThreadManager implementation into threads.cpp
+        # First, remove our previous experimental append from search.h if it exists
+        sed -i '/ThreadManager::ThreadManager/d' src/search.h || true
+        sed -i '/ThreadManager::~ThreadManager/d' src/search.h || true
+
+        # Now, define the constructor/destructor properly inside threads.cpp where both Searcher and ThreadManager are fully known
+        cat << 'EOF' >> src/threads.cpp
+
+        ThreadManager::ThreadManager() : thread_data(options.threads) {}
+        ThreadManager::~ThreadManager() = default;
+        EOF
 
     - name: Download SIMDe and Fix Header Collisions
       run: |
@@ -80,9 +90,6 @@ jobs:
       run: |
         sed -i 's/-march=native//g' Makefile
         sed -i 's/ARCH_DETECTED =/ARCH_DETECTED = NONE/g' Makefile
-        
-        # Ensure static C++ library flags are placed squarely in the link command line
-        sed -i 's/\$(CXX) \$(OBJECTS)/\$(CXX) \$(OBJECTS) -static-libstdc++/g' Makefile || true
 
     - name: Compile Spaghet for Android (aarch64)
       run: |
@@ -93,6 +100,7 @@ jobs:
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           NATIVE="-march=armv8-a" \
           CXXFLAGS="-O3 -flto -fno-exceptions -std=c++20 -DNDEBUG -DUSE_SIMD -DUSE_AVX2 -DEVALFILE=\\\"master0002.bin\\\" -DSIMDE_ENABLE_NATIVE_ALIASES" \
+          FLAGS="-pthread" \
           EXE=spaghet-android-arm64
 
     - name: Bench via QEMU
