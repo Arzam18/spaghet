@@ -38,10 +38,10 @@ jobs:
         # Download the network manually so the Makefile doesn't spam the logs with wget progress
         curl -sSL -o master0002.bin https://github.com/yl25946/vault/raw/main/master0002.bin
 
-    - name: Polyfill std::jthread for Android
+    - name: Apply Android C++ Polyfills & Patches
       run: |
-        # Android NDK's libc++ lacks complete C++20 std::jthread support. 
-        # We inject a lightweight polyfill wrapper around std::thread to provide the auto-joining behavior.
+        # 1. Android NDK's libc++ lacks complete C++20 std::jthread support. 
+        # We inject a lightweight polyfill wrapper around std::thread.
         cat << 'EOF' > src/jthread_polyfill.h
         #pragma once
         #include <thread>
@@ -63,11 +63,14 @@ jobs:
         }
         EOF
         
-        # Replace std::jthread with compat::jthread globally
+        # Replace std::jthread globally and inject header
         find src -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's/std::jthread/compat::jthread/g' {} +
-        
-        # Inject the include at the top of threads.h where the error occurred
         sed -i '1i #include "jthread_polyfill.h"' src/threads.h
+
+        # 2. Fix C++20 incomplete type constraint on std::vector<Searcher>
+        # We decouple the ThreadManager constructor/destructor and move it to the bottom of search.h where Searcher is fully defined.
+        perl -0777 -pi -e 's/ThreadManager\s*\(\)\s*:\s*thread_data\(options\.threads\)\s*\{\}/ThreadManager();\n    ~ThreadManager();/g' src/threads.h
+        echo -e '\ninline ThreadManager::ThreadManager() : thread_data(options.threads) {}\ninline ThreadManager::~ThreadManager() = default;' >> src/search.h
 
     - name: Download SIMDe and Fix Header Collisions
       run: |
