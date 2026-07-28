@@ -38,6 +38,37 @@ jobs:
         # Download the network manually so the Makefile doesn't spam the logs with wget progress
         curl -sSL -o master0002.bin https://github.com/yl25946/vault/raw/main/master0002.bin
 
+    - name: Polyfill std::jthread for Android
+      run: |
+        # Android NDK's libc++ lacks complete C++20 std::jthread support. 
+        # We inject a lightweight polyfill wrapper around std::thread to provide the auto-joining behavior.
+        cat << 'EOF' > src/jthread_polyfill.h
+        #pragma once
+        #include <thread>
+        #include <utility>
+        namespace compat {
+            class jthread {
+                std::thread t;
+            public:
+                jthread() noexcept = default;
+                template <typename Callable, typename... Args>
+                explicit jthread(Callable&& f, Args&&... args) : t(std::forward<Callable>(f), std::forward<Args>(args)...) {}
+                ~jthread() { if (t.joinable()) t.join(); }
+                jthread(jthread&&) noexcept = default;
+                jthread& operator=(jthread&&) noexcept = default;
+                void join() { t.join(); }
+                bool joinable() const noexcept { return t.joinable(); }
+                void detach() { t.detach(); }
+            };
+        }
+        EOF
+        
+        # Replace std::jthread with compat::jthread globally
+        find src -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's/std::jthread/compat::jthread/g' {} +
+        
+        # Inject the include at the top of threads.h where the error occurred
+        sed -i '1i #include "jthread_polyfill.h"' src/threads.h
+
     - name: Download SIMDe and Fix Header Collisions
       run: |
         # 1. Download SIMDe directly into src/
@@ -62,8 +93,6 @@ jobs:
         export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
         
         # Build using NDK Clang. 
-        # Pass -DSIMDE_ENABLE_NATIVE_ALIASES globally in CXXFLAGS.
-        # Use FLAGS instead of LDFLAGS since this specific Makefile uses $(FLAGS) for linking.
         make \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           NATIVE="-march=armv8-a" \
