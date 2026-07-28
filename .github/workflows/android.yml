@@ -35,13 +35,10 @@ jobs:
 
     - name: Download Network Silently
       run: |
-        # Download the network manually so the Makefile doesn't spam the logs with wget progress
         curl -sSL -o master0002.bin https://github.com/yl25946/vault/raw/main/master0002.bin
 
     - name: Apply Android C++ Polyfills & Patches
       run: |
-        # 1. Android NDK's libc++ lacks complete C++20 std::jthread support. 
-        # We inject a lightweight polyfill wrapper around std::thread.
         cat << 'EOF' > src/jthread_polyfill.h
         #pragma once
         #include <thread>
@@ -63,31 +60,24 @@ jobs:
         }
         EOF
         
-        # Replace std::jthread globally and inject header
         find src -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's/std::jthread/compat::jthread/g' {} +
         sed -i '1i #include "jthread_polyfill.h"' src/threads.h
 
-        # 2. Fix C++20 incomplete type constraint on std::vector<Searcher>
-        # We decouple the ThreadManager constructor/destructor and move it to the bottom of search.h where Searcher is fully defined.
         perl -0777 -pi -e 's/ThreadManager\s*\(\)\s*:\s*thread_data\(options\.threads\)\s*\{\}/ThreadManager();\n    ~ThreadManager();/g' src/threads.h
         echo -e '\ninline ThreadManager::ThreadManager() : thread_data(options.threads) {}\ninline ThreadManager::~ThreadManager() = default;' >> src/search.h
 
     - name: Download SIMDe and Fix Header Collisions
       run: |
-        # 1. Download SIMDe directly into src/
         git clone --depth 1 https://github.com/simd-everywhere/simde.git simde-repo
         mv simde-repo/simde src/simde
         
-        # 2. Patch ALL instances of <immintrin.h> globally to use SIMDe instead
         find src -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's@#include <immintrin.h>@#if defined(__aarch64__) || defined(_M_ARM64)\n#include "simde/x86/avx2.h"\n#else\n#include <immintrin.h>\n#endif@g' {} +
 
-        # 3. Fix Android NDK <time.h> collision
         mv src/time.h src/timeman.h || true
         find src -type f \( -name "*.h" -o -name "*.cpp" \) -exec sed -i 's/"time.h"/"timeman.h"/g' {} +
 
     - name: Patch Makefile
       run: |
-        # Prevent the Makefile from running -march=native in its property detection shell script
         sed -i 's/-march=native//g' Makefile
         sed -i 's/ARCH_DETECTED =/ARCH_DETECTED = NONE/g' Makefile
 
@@ -95,12 +85,12 @@ jobs:
       run: |
         export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
         
-        # Build using NDK Clang. 
+        # Build using NDK Clang with proper Android flags
         make \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           NATIVE="-march=armv8-a" \
           CXXFLAGS="-O3 -flto -fno-exceptions -std=c++20 -DNDEBUG -DUSE_SIMD -DUSE_AVX2 -DEVALFILE=\\\"master0002.bin\\\" -DSIMDE_ENABLE_NATIVE_ALIASES" \
-          FLAGS="-fuse-ld=lld -static-libstdc++" \
+          FLAGS="-pthread -static-libstdc++" \
           EXE=spaghet-android-arm64
 
     - name: Bench via QEMU
