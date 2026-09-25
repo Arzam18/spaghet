@@ -19,15 +19,19 @@ jobs:
       EVALFILE: "master0002.bin"
 
     steps:
+
       # ============================================================
       # CHECKOUT
       # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
+
 
       # ============================================================
       # ANDROID SDK
       # ============================================================
+
       - name: Locate Android SDK
         shell: bash
         run: |
@@ -44,12 +48,15 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
 
+          echo
           echo "Android SDK:"
           echo "$SDK"
+
 
       # ============================================================
       # SELECT NDK
       # ============================================================
+
       - name: Select NDK
         shell: bash
         run: |
@@ -63,10 +70,12 @@ jobs:
             -mindepth 1 \
             -maxdepth 1 \
             -type d \
-            -printf '%f\n' | sort -V || true
+            -printf '%f\n' \
+            | sort -V || true
 
           if [ ! -d "$NDK" ]; then
-            echo "ERROR: Expected NDK not installed:"
+            echo
+            echo "ERROR: Expected NDK is not installed:"
             echo "$NDK"
             exit 1
           fi
@@ -78,9 +87,11 @@ jobs:
           echo "Using NDK:"
           echo "$NDK"
 
+
       # ============================================================
-      # ARM64 CLANG
+      # LOCATE ARM64 CLANG
       # ============================================================
+
       - name: Locate ARM64 compiler
         shell: bash
         run: |
@@ -90,26 +101,32 @@ jobs:
           CXX="$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang++"
 
           if [ ! -x "$CXX" ]; then
+            echo
             echo "ERROR: ARM64 Android compiler not found:"
             echo "$CXX"
-
+            echo
+            echo "Available clang++ binaries:"
             find "$TOOLCHAIN" \
               -maxdepth 1 \
               -type f \
               -name '*clang++' \
-              -print | sort || true
-
+              -print \
+              | sort || true
             exit 1
           fi
 
           echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
           echo "CXX=$CXX" >> "$GITHUB_ENV"
 
+          echo
+          echo "Compiler:"
           "$CXX" --version
+
 
       # ============================================================
       # DOWNLOAD NNUE
       # ============================================================
+
       - name: Download NNUE
         shell: bash
         run: |
@@ -122,12 +139,15 @@ jobs:
 
           test -s "$EVALFILE"
 
+          echo
           echo "NNUE:"
           ls -lh "$EVALFILE"
+
 
       # ============================================================
       # FIX SEARCHER / THREADMANAGER INCLUDE ORDER
       # ============================================================
+
       - name: Fix Searcher ThreadManager include order
         shell: bash
         run: |
@@ -139,19 +159,26 @@ jobs:
           search_h = Path("src/search.h")
           search_cpp = Path("src/search.cpp")
 
+          if not search_h.exists():
+              raise SystemExit("ERROR: src/search.h not found")
+
+          if not search_cpp.exists():
+              raise SystemExit("ERROR: src/search.cpp not found")
+
           h = search_h.read_text()
 
-          # Remove circular include.
+          # Remove the circular include if present.
           h = h.replace('#include "threads.h"\n', '')
 
-          # Searcher can refer to ThreadManager through a pointer/reference
-          # without requiring the complete class here.
+          # Searcher only needs a declaration of ThreadManager
+          # in the header.
           if 'class ThreadManager;' not in h:
               marker = 'class Searcher\n'
 
               if marker not in h:
                   raise SystemExit(
-                      "ERROR: Could not locate Searcher declaration in search.h"
+                      "ERROR: Could not locate "
+                      "'class Searcher' in search.h"
                   )
 
               h = h.replace(
@@ -164,11 +191,13 @@ jobs:
 
           cpp = search_cpp.read_text()
 
+          # search.cpp needs the complete ThreadManager definition.
           if '#include "threads.h"' not in cpp:
               if '#include "search.h"\n' in cpp:
                   cpp = cpp.replace(
                       '#include "search.h"\n',
-                      '#include "search.h"\n#include "threads.h"\n',
+                      '#include "search.h"\n'
+                      '#include "threads.h"\n',
                       1
                   )
               else:
@@ -179,9 +208,11 @@ jobs:
           print("Searcher/ThreadManager include order fixed.")
           PY
 
+
       # ============================================================
       # NATIVE ARM64 NEON SIMD
       # ============================================================
+
       - name: Add native ARM64 NEON SIMD
         shell: bash
         run: |
@@ -191,11 +222,16 @@ jobs:
           from pathlib import Path
 
           p = Path("src/simd.h")
+
+          if not p.exists():
+              raise SystemExit("ERROR: src/simd.h not found")
+
           s = p.read_text()
 
           # --------------------------------------------------------
-          # Architecture-specific include.
+          # ARM NEON include
           # --------------------------------------------------------
+
           old_include = """#if defined(USE_SIMD)
           #include <immintrin.h>
           #endif"""
@@ -207,21 +243,28 @@ jobs:
           #endif"""
 
           if old_include in s:
-              s = s.replace(old_include, new_include, 1)
+              s = s.replace(
+                  old_include,
+                  new_include,
+                  1
+              )
           elif "#include <arm_neon.h>" not in s:
               raise SystemExit(
                   "ERROR: SIMD include block not found."
               )
 
           # --------------------------------------------------------
-          # NEON backend.
+          # Do not insert twice
           # --------------------------------------------------------
+
           if "#if defined(USE_NEON)" not in s:
+
               marker = "#if defined(USE_AVX512)"
 
               if marker not in s:
                   raise SystemExit(
-                      "ERROR: USE_AVX512 block not found."
+                      "ERROR: USE_AVX512 block not found "
+                      "in src/simd.h"
                   )
 
               neon = r'''
@@ -252,30 +295,52 @@ jobs:
 
           inline vepi16 set_epi16(int num)
           {
-              return vdupq_n_s16(static_cast<int16_t>(num));
+              return vdupq_n_s16(
+                  static_cast<int16_t>(num)
+              );
           }
 
           inline vepi32 set_epi32(int num)
           {
-              return vdupq_n_s32(static_cast<int32_t>(num));
+              return vdupq_n_s32(
+                  static_cast<int32_t>(num)
+              );
           }
 
-          inline vepi16 add_epi16(vepi16 v1, vepi16 v2)
+          inline vepi16 add_epi16(
+              vepi16 v1,
+              vepi16 v2
+          )
           {
               return vaddq_s16(v1, v2);
           }
 
-          inline vepi32 add_epi32(vepi32 v1, vepi32 v2)
+          inline vepi32 add_epi32(
+              vepi32 v1,
+              vepi32 v2
+          )
           {
               return vaddq_s32(v1, v2);
           }
 
-          inline vepi16 multiply_epi16(vepi16 v1, vepi16 v2)
+          inline vepi16 multiply_epi16(
+              vepi16 v1,
+              vepi16 v2
+          )
           {
               return vmulq_s16(v1, v2);
           }
 
-          inline vepi32 multiply_add_epi16(vepi16 v1, vepi16 v2)
+          // Equivalent to:
+          //
+          // _mm256_madd_epi16
+          //
+          // Multiply adjacent signed int16 pairs and add
+          // each pair into signed int32 results.
+          inline vepi32 multiply_add_epi16(
+              vepi16 v1,
+              vepi16 v2
+          )
           {
               const int32x4_t lo =
                   vmull_s16(
@@ -292,11 +357,18 @@ jobs:
               return vpaddq_s32(lo, hi);
           }
 
-          inline vepi16 clip(vepi16 vector, int L1Q)
+          inline vepi16 clip(
+              vepi16 vector,
+              int L1Q
+          )
           {
-              const vepi16 zero = vdupq_n_s16(0);
+              const vepi16 zero =
+                  vdupq_n_s16(0);
+
               const vepi16 maxv =
-                  vdupq_n_s16(static_cast<int16_t>(L1Q));
+                  vdupq_n_s16(
+                      static_cast<int16_t>(L1Q)
+                  );
 
               return vminq_s16(
                   vmaxq_s16(vector, zero),
@@ -304,7 +376,9 @@ jobs:
               );
           }
 
-          inline int reduce_add_epi32(vepi32 vector)
+          inline int reduce_add_epi32(
+              vepi32 vector
+          )
           {
               int32x2_t sum =
                   vadd_s32(
@@ -329,6 +403,7 @@ jobs:
           p.write_text(s)
 
           print("Native ARM64 NEON backend installed.")
+
           PY
 
           echo
@@ -337,21 +412,55 @@ jobs:
             'USE_NEON|USE_AVX512|USE_AVX2|arm_neon|immintrin' \
             src/simd.h || true
 
+
       # ============================================================
-      # BUILD
+      # SHOW SOURCE TREE
       # ============================================================
-      - name: Compile Android ARM64 NEON
+
+      - name: Show source tree
         shell: bash
         run: |
           set -eux
 
+          echo "C++ source files:"
+          find src \
+            -maxdepth 1 \
+            -type f \
+            \( -name '*.cpp' -o -name '*.h' \) \
+            -print \
+            | sort
+
+
+      # ============================================================
+      # COMPILE
+      #
+      # IMPORTANT:
+      # We capture the complete compiler output.
+      # This prevents GitHub Actions from hiding the real errors
+      # behind the warning output.
+      # ============================================================
+
+      - name: Compile Android ARM64 NEON
+        shell: bash
+        run: |
+          set -u
+
           mkdir -p build/android-arm64-neon
 
+          LOG="build/android-arm64-neon/build.log"
+
+          echo "========================================"
+          echo "Spaghet Android ARM64 NEON"
+          echo "========================================"
+          echo
           echo "Compiler:"
           "$CXX" --version
-
           echo
-          echo "Building Spaghet..."
+
+          echo "Starting compilation..."
+          echo
+
+          set +e
 
           "$CXX" \
             -O3 \
@@ -377,16 +486,59 @@ jobs:
             -ffunction-sections \
             src/*.cpp \
             -pthread \
-            -o build/android-arm64-neon/spaghet
+            -o build/android-arm64-neon/spaghet \
+            >"$LOG" 2>&1
+
+          STATUS=$?
+
+          set -e
 
           echo
-          echo "BUILD SUCCESSFUL"
+          echo "========================================"
+          echo "COMPILER EXIT CODE: $STATUS"
+          echo "========================================"
+          echo
 
-          ls -lh build/android-arm64-neon/spaghet
+          if [ "$STATUS" -ne 0 ]; then
+
+            echo "========================================"
+            echo "ACTUAL COMPILER ERRORS"
+            echo "========================================"
+            echo
+
+            grep -n -E \
+              '(^|:)error:|undefined reference|ld\.lld:|fatal error' \
+              "$LOG" || true
+
+            echo
+            echo "========================================"
+            echo "LAST 200 LINES OF FULL BUILD LOG"
+            echo "========================================"
+            tail -n 200 "$LOG"
+
+            echo
+            echo "========================================"
+            echo "FULL BUILD LOG"
+            echo "========================================"
+            cat "$LOG"
+
+            exit "$STATUS"
+          fi
+
+          echo
+          echo "========================================"
+          echo "BUILD SUCCESSFUL"
+          echo "========================================"
+          echo
+
+          ls -lh \
+            build/android-arm64-neon/spaghet
+
 
       # ============================================================
       # VERIFY ARM64 ELF
       # ============================================================
+
       - name: Verify ARM64 binary
         shell: bash
         run: |
@@ -401,19 +553,27 @@ jobs:
           echo "----- ELF header -----"
           readelf -h "$BINARY"
 
+          echo
+          echo "----- ARM64 verification -----"
+
           file "$BINARY" | grep -Ei \
             'ARM aarch64|ARM64|AArch64'
 
-          readelf -h "$BINARY" | grep "Class:" | grep "ELF64"
+          readelf -h "$BINARY" \
+            | grep "Class:" \
+            | grep "ELF64"
 
-          readelf -h "$BINARY" | grep "Machine:" | grep -Ei \
-            'AArch64|ARM'
+          readelf -h "$BINARY" \
+            | grep "Machine:" \
+            | grep -Ei 'AArch64|ARM'
 
           test -x "$BINARY"
 
+
       # ============================================================
-      # VERIFY EMBEDDED NNUE
+      # VERIFY NNUE
       # ============================================================
+
       - name: Verify embedded NNUE
         shell: bash
         run: |
@@ -426,12 +586,17 @@ jobs:
 
           echo
           echo "NNUE-related symbols:"
-          readelf -s "$BINARY" | grep -E \
-            'gEVALData|gEVALEnd|gEVALSize' || true
+
+          readelf -s "$BINARY" \
+            | grep -E \
+              'gEVALData|gEVALEnd|gEVALSize' \
+            || true
+
 
       # ============================================================
-      # ONE BINARY ONLY
+      # PREPARE ONE-FILE ARTIFACT
       # ============================================================
+
       - name: Prepare artifact
         shell: bash
         run: |
@@ -444,17 +609,31 @@ jobs:
             build/android-arm64-neon/spaghet \
             artifact/spaghet-android-arm64-neon
 
-          chmod +x artifact/spaghet-android-arm64-neon
+          chmod +x \
+            artifact/spaghet-android-arm64-neon
 
+          echo
           echo "Final artifact:"
           ls -lah artifact
 
-          COUNT="$(find artifact -maxdepth 1 -type f | wc -l)"
+          COUNT="$(
+            find artifact \
+              -maxdepth 1 \
+              -type f \
+              | wc -l
+          )"
 
           if [ "$COUNT" -ne 1 ]; then
-            echo "ERROR: Expected exactly one binary."
+            echo
+            echo "ERROR: Expected exactly ONE binary."
+            echo "Found: $COUNT"
             exit 1
           fi
+
+
+      # ============================================================
+      # UPLOAD ONLY THE BINARY
+      # ============================================================
 
       - name: Upload Android binary
         uses: actions/upload-artifact@v4
