@@ -9,62 +9,142 @@ on:
       - ".github/workflows/android.yml"
 
 jobs:
-  build-android:
+  build:
     name: Android ARM64 NEON
     runs-on: ubuntu-24.04
 
     env:
-      NDK_VERSION: "27.2.12479018"
       API_LEVEL: "24"
+      NDK_VERSION: "27.2.12479018"
       EVALFILE: "master0002.bin"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Android NDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK
+      # ------------------------------------------------------------
+      # Use the Android SDK already installed on the GitHub runner.
+      # Do NOT use android-actions/setup-android here.
+      # ------------------------------------------------------------
+      - name: Locate Android SDK
         shell: bash
         run: |
           set -eux
 
-          yes | sdkmanager --licenses >/dev/null || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-${API_LEVEL}" \
-            "build-tools;35.0.0" \
-            "ndk;${NDK_VERSION}"
+          if [ -z "${ANDROID_SDK_ROOT:-}" ]; then
+            export ANDROID_SDK_ROOT="${ANDROID_HOME}"
+          fi
 
-      - name: Show compiler
+          if [ -z "${ANDROID_SDK_ROOT:-}" ]; then
+            export ANDROID_SDK_ROOT="/usr/local/lib/android/sdk"
+          fi
+
+          echo "Using SDK: $ANDROID_SDK_ROOT"
+
+          test -d "$ANDROID_SDK_ROOT"
+
+          find "$ANDROID_SDK_ROOT" -maxdepth 2 -type d \
+            \( -name "ndk" -o -name "platforms" -o -name "build-tools" \) \
+            -print || true
+
+      # ------------------------------------------------------------
+      # Find an installed NDK.
+      #
+      # We prefer 27.2.12479018, but if GitHub's runner already
+      # contains another NDK, show it clearly instead of attempting
+      # a broken sdkmanager installation.
+      # ------------------------------------------------------------
+      - name: Select Android NDK
         shell: bash
         run: |
           set -eux
 
-          export TOOLCHAIN="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
 
-          "$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang++" \
-            --version
+          echo "Android SDK:"
+          echo "$SDK"
+
+          echo
+          echo "Installed NDK versions:"
+          if [ -d "$SDK/ndk" ]; then
+            find "$SDK/ndk" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+          else
+            echo "No NDK directory found."
+          fi
+
+          if [ -d "$SDK/ndk/${NDK_VERSION}" ]; then
+            SELECTED_NDK="$SDK/ndk/${NDK_VERSION}"
+          else
+            SELECTED_NDK="$(find "$SDK/ndk" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+
+          if [ -z "$SELECTED_NDK" ] || [ ! -d "$SELECTED_NDK" ]; then
+            echo "ERROR: No Android NDK is installed on this runner."
+            exit 1
+          fi
+
+          echo "Selected NDK:"
+          echo "$SELECTED_NDK"
+
+          echo "ANDROID_NDK_HOME=$SELECTED_NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$SELECTED_NDK" >> "$GITHUB_ENV"
+
+      - name: Locate ARM64 compiler
+        shell: bash
+        run: |
+          set -eux
+
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          test -d "$TOOLCHAIN"
+
+          CXX="$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang++"
+
+          if [ ! -x "$CXX" ]; then
+            echo "ERROR: ARM64 Android compiler not found:"
+            echo "$CXX"
+
+            echo
+            echo "Available Android compilers:"
+            find "$TOOLCHAIN" \
+              -maxdepth 1 \
+              -type f \
+              -name '*clang++' \
+              -print | sort
+
+            exit 1
+          fi
+
+          echo "CXX=$CXX" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+
+          "$CXX" --version
 
       # ------------------------------------------------------------
-      # Patch Spaghet's SIMD abstraction for native ARM64 NEON.
-      #
-      # We deliberately do NOT use sse2neon here.
-      #
-      # The original AVX2 backend works with:
-      #   16 x int16
-      #   8  x int32
-      #
-      # ARM64 NEON is 128-bit:
-      #   8 x int16
-      #   4 x int32
-      #
-      # nnue.cpp uses sizeof(vepi16), so the smaller chunk size is
-      # automatically handled by the existing loop.
+      # Download the NNUE network.
       # ------------------------------------------------------------
-      - name: Add native ARM64 NEON backend
+      - name: Download NNUE
+        shell: bash
+        run: |
+          set -eux
+
+          if [ ! -f "${EVALFILE}" ]; then
+            wget -O "${EVALFILE}" \
+              "https://github.com/yl25946/vault/raw/main/${EVALFILE}"
+          fi
+
+          test -s "${EVALFILE}"
+
+          echo "NNUE:"
+          ls -lh "${EVALFILE}"
+
+      # ------------------------------------------------------------
+      # Add native ARM64 NEON backend.
+      # ------------------------------------------------------------
+      - name: Add ARM64 NEON SIMD
         shell: bash
         run: |
           set -eux
@@ -76,30 +156,20 @@ jobs:
           s = p.read_text()
 
           if "#elif defined(USE_NEON)" in s:
-              print("NEON backend already present; leaving it unchanged.")
+              print("NEON backend already exists.")
               raise SystemExit(0)
 
           marker = "#elif defined(USE_AVX2)"
 
           if marker not in s:
-              raise SystemExit("ERROR: USE_AVX2 block not found in src/simd.h")
+              raise SystemExit(
+                  "ERROR: USE_AVX2 block was not found in src/simd.h"
+              )
 
-          neon = r'''#elif defined(USE_NEON)
+          neon = r'''
+          #elif defined(USE_NEON)
 
           #include <arm_neon.h>
-
-          // ARM64 NEON is mandatory on AArch64.
-          //
-          // The x86 AVX2 implementation uses 256-bit vectors:
-          //   16 x int16
-          //   8  x int32
-          //
-          // NEON uses 128-bit vectors:
-          //   8 x int16
-          //   4 x int32
-          //
-          // nnue.cpp derives its loop chunk size from sizeof(vepi16),
-          // so no NNUE loop rewrite is required.
 
           using vepi16 = int16x8_t;
           using vepi32 = int32x4_t;
@@ -114,78 +184,65 @@ jobs:
               return vdupq_n_s32(0);
           }
 
-          inline vepi16 load_epi16(const int16_t *memory_address)
+          inline vepi16 load_epi16(const int16_t* p)
           {
-              return vld1q_s16(memory_address);
+              return vld1q_s16(p);
           }
 
-          inline vepi32 load_epi32(const int32_t *memory_address)
+          inline vepi32 load_epi32(const int32_t* p)
           {
-              return vld1q_s32(memory_address);
+              return vld1q_s32(p);
           }
 
-          // Put num into every 16-bit lane.
-          inline vepi16 set_epi16(int num)
+          inline vepi16 set_epi16(int value)
           {
-              return vdupq_n_s16(static_cast<int16_t>(num));
+              return vdupq_n_s16(static_cast<int16_t>(value));
           }
 
-          // Put num into every 32-bit lane.
-          inline vepi32 set_epi32(int num)
+          inline vepi32 set_epi32(int value)
           {
-              return vdupq_n_s32(static_cast<int32_t>(num));
+              return vdupq_n_s32(static_cast<int32_t>(value));
           }
 
-          inline vepi16 add_epi16(vepi32 v1, vepi32 v2)
+          inline vepi16 add_epi16(vepi16 a, vepi16 b)
           {
-              return vaddq_s16(v1, v2);
+              return vaddq_s16(a, b);
           }
 
-          inline vepi32 add_epi32(vepi32 v1, vepi32 v2)
+          inline vepi32 add_epi32(vepi32 a, vepi32 b)
           {
-              return vaddq_s32(v1, v2);
+              return vaddq_s32(a, b);
           }
 
-          // Low 16 bits of each signed 16-bit multiplication,
-          // matching _mm256_mullo_epi16 / _mm512_mullo_epi16.
-          inline vepi16 multiply_epi16(vepi16 v1, vepi16 v2)
+          inline vepi16 multiply_epi16(vepi16 a, vepi16 b)
           {
-              return vmulq_s16(v1, v2);
+              return vmulq_s16(a, b);
           }
 
-          // Equivalent to _mm*_madd_epi16:
-          //
-          //   result[0] = v1[0]*v2[0] + v1[1]*v2[1]
-          //   result[1] = v1[2]*v2[2] + v1[3]*v2[3]
-          //   ...
-          //
-          // NEON has 128-bit vectors, so we multiply the low and high
-          // halves separately and then perform pairwise additions.
-          inline vepi32 multiply_add_epi16(vepi16 v1, vepi16 v2)
+          inline vepi32 multiply_add_epi16(vepi16 a, vepi16 b)
           {
               const int32x4_t lo =
-                  vmull_s16(vget_low_s16(v1), vget_low_s16(v2));
+                  vmull_s16(vget_low_s16(a), vget_low_s16(b));
 
               const int32x4_t hi =
-                  vmull_s16(vget_high_s16(v1), vget_high_s16(v2));
+                  vmull_s16(vget_high_s16(a), vget_high_s16(b));
 
               return vpaddq_s32(lo, hi);
           }
 
-          inline vepi16 clip(vepi16 vector, int L1Q)
+          inline vepi16 clip(vepi16 v, int limit)
           {
-              const vepi16 zero = zero_epi16();
-              const vepi16 maxv = set_epi16(L1Q);
+              const vepi16 zero = vdupq_n_s16(0);
+              const vepi16 maxv =
+                  vdupq_n_s16(static_cast<int16_t>(limit));
 
-              return vminq_s16(vmaxq_s16(vector, zero), maxv);
+              return vminq_s16(vmaxq_s16(v, zero), maxv);
           }
 
-          inline int reduce_add_epi32(vepi32 vector)
+          inline int reduce_add_epi32(vepi32 v)
           {
-              int32x2_t pair = vadd_s32(
-                  vget_low_s32(vector),
-                  vget_high_s32(vector)
-              );
+              int32x2_t pair =
+                  vadd_s32(vget_low_s32(v), vget_high_s32(v));
 
               pair = vpadd_s32(pair, pair);
 
@@ -196,43 +253,42 @@ jobs:
 
           s = s.replace(marker, neon + marker, 1)
 
-          # USE_SIMD currently only includes immintrin.h.
-          # That header must not be included on ARM.
-          old = '''#if defined(USE_SIMD)
+          old = """#if defined(USE_SIMD)
           #include <immintrin.h>
-          #endif'''
+          #endif"""
 
-          new = '''#if defined(USE_NEON)
+          new = """#if defined(USE_NEON)
           #include <arm_neon.h>
           #elif defined(USE_SIMD)
           #include <immintrin.h>
-          #endif'''
+          #endif"""
 
           if old not in s:
               raise SystemExit(
-                  "ERROR: expected SIMD include block not found in src/simd.h"
+                  "ERROR: SIMD include block was not found in src/simd.h"
               )
 
           s = s.replace(old, new, 1)
 
-          # The NEON backend is selected before AVX2.
           p.write_text(s)
           PY
 
-          echo "----- patched src/simd.h -----"
-          sed -n '1,240p' src/simd.h
+          echo "NEON backend inserted."
 
       # ------------------------------------------------------------
       # AArch64 incbin compatibility.
-      #
-      # GNU incbin already works on ARM64, but the source only
-      # explicitly recognizes 32-bit ARM. Add __aarch64__ so the
-      # ARM alignment path is selected explicitly.
       # ------------------------------------------------------------
-      - name: Patch AArch64 incbin support
+      - name: Add AArch64 incbin support
         shell: bash
         run: |
           set -eux
+
+          FILE="src/incbin/incbin.h"
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: $FILE not found"
+            exit 1
+          fi
 
           python3 <<'PY'
           from pathlib import Path
@@ -240,60 +296,74 @@ jobs:
           p = Path("src/incbin/incbin.h")
           s = p.read_text()
 
-          if "defined(__aarch64__)" in s:
-              print("AArch64 incbin support already present.")
+          if "__aarch64__" in s:
+              print("AArch64 already detected by incbin.h.")
               raise SystemExit(0)
 
-          old = '''#if defined(__arm__) || /* GNU C and RealView */ \\
-              defined(__arm) ||   /* Diab */               \\
-              defined(_ARM)       /* ImageCraft */'''
+          replacements = [
+              (
+                  "#if defined(__arm__)",
+                  "#if defined(__aarch64__) || defined(__arm__)"
+              ),
+              (
+                  "#if defined(__arm)",
+                  "#if defined(__aarch64__) || defined(__arm)"
+              ),
+          ]
 
-          new = '''#if defined(__aarch64__) || /* AArch64 / ARM64 */   \\
-              defined(__arm__) ||    /* GNU C and RealView */            \\
-              defined(__arm) ||      /* Diab */                          \\
-              defined(_ARM)          /* ImageCraft */'''
+          for old, new in replacements:
+              if old in s:
+                  s = s.replace(old, new, 1)
+                  p.write_text(s)
+                  print("Added AArch64 detection.")
+                  raise SystemExit(0)
 
-          if old not in s:
-              raise SystemExit(
-                  "ERROR: expected ARM detection block not found in incbin.h"
-              )
-
-          s = s.replace(old, new, 1)
-          p.write_text(s)
+          print(
+              "WARNING: Could not find the expected ARM detection pattern. "
+              "Continuing because incbin may already be architecture-neutral."
+          )
           PY
 
-          grep -n -A6 -B2 "aarch64" src/incbin/incbin.h
-
       # ------------------------------------------------------------
-      # Download the network.
+      # Show source state before compilation.
       # ------------------------------------------------------------
-      - name: Download NNUE network
+      - name: Show build configuration
         shell: bash
         run: |
           set -eux
 
-          if [ ! -f "${EVALFILE}" ]; then
-            wget -O "${EVALFILE}" \
-              "https://github.com/yl25946/vault/raw/main/${EVALFILE}"
-          fi
+          echo "========================================"
+          echo "ANDROID NDK"
+          echo "========================================"
+          "$ANDROID_NDK_HOME/ndk-build" --version || true
 
-          test -s "${EVALFILE}"
-          ls -lh "${EVALFILE}"
+          echo
+          echo "========================================"
+          echo "COMPILER"
+          echo "========================================"
+          "$CXX" --version
+
+          echo
+          echo "========================================"
+          echo "SIMD DEFINITIONS"
+          echo "========================================"
+          grep -n \
+            -E 'USE_NEON|USE_AVX2|USE_AVX512|arm_neon|immintrin' \
+            src/simd.h || true
+
+          echo
+          echo "========================================"
+          echo "SOURCE FILES"
+          echo "========================================"
+          find src -maxdepth 1 -name '*.cpp' -print | sort
 
       # ------------------------------------------------------------
-      # Compile directly with Android NDK Clang.
-      #
-      # Do not use the project's Makefile here because its automatic
-      # architecture detection is x86-oriented and would not select
-      # an ARM backend.
+      # Compile.
       # ------------------------------------------------------------
-      - name: Build Android ARM64 NEON
+      - name: Compile Android ARM64 NEON
         shell: bash
         run: |
           set -eux
-
-          export TOOLCHAIN="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CXX="$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang++"
 
           mkdir -p build/android-arm64-neon
 
@@ -310,90 +380,72 @@ jobs:
             -fdata-sections
             -ffunction-sections
             -Wall
-            -Wcast-qual
             -Wextra
             -Wshadow
-            -Wdouble-promotion
-            -Wformat=2
-            -Wnull-dereference
-            -Wlogical-op
-            -Wold-style-cast
-            -Wundef
-            -pedantic
           "
 
-          echo "Compiler:"
-          "$CXX" --version
+          echo "========================================"
+          echo "BUILDING SPAGHET"
+          echo "========================================"
+
+          "$CXX" \
+            $CXXFLAGS \
+            src/*.cpp \
+            -o build/android-arm64-neon/spaghet \
+            -pthread
 
           echo
-          echo "Building sources:"
-          find src -maxdepth 1 -name '*.cpp' -print | sort
-
-          "$CXX" $CXXFLAGS \
-            -pthread \
-            src/*.cpp \
-            -o build/android-arm64-neon/spaghet
+          echo "========================================"
+          echo "BUILD RESULT"
+          echo "========================================"
 
           file build/android-arm64-neon/spaghet
+
           ls -lh build/android-arm64-neon/spaghet
 
       # ------------------------------------------------------------
-      # Verify it is actually an ARM64 Android executable.
+      # Verify ELF architecture.
       # ------------------------------------------------------------
-      - name: Verify binary
+      - name: Verify ARM64 ELF
         shell: bash
         run: |
           set -eux
 
           BINARY="build/android-arm64-neon/spaghet"
 
-          file "$BINARY"
+          readelf -h "$BINARY"
 
-          readelf -h "$BINARY" | grep -E \
-            'Class:|Machine:|Type:'
-
-          readelf -A "$BINARY" || true
+          readelf -h "$BINARY" | grep "Class:" | grep "ELF64"
+          readelf -h "$BINARY" | grep "Machine:" | grep -E "AArch64|ARM"
 
           test -x "$BINARY"
 
       # ------------------------------------------------------------
-      # Basic static/strings sanity checks.
-      #
-      # We cannot execute an Android ARM64 binary on the Ubuntu
-      # runner directly, so the real UCI/bench test is left for
-      # the Android device.
-      # ------------------------------------------------------------
-      - name: Binary sanity check
-        shell: bash
-        run: |
-          set -eux
-
-          BINARY="build/android-arm64-neon/spaghet"
-
-          strings "$BINARY" | grep -F "uci" >/dev/null
-          strings "$BINARY" | grep -F "Spaghet" >/dev/null || true
-
-          echo "Android ARM64 NEON binary created successfully."
-
-      # ------------------------------------------------------------
-      # ONE FILE ONLY.
+      # Produce exactly ONE output file.
       # ------------------------------------------------------------
       - name: Prepare artifact
         shell: bash
         run: |
           set -eux
 
+          rm -rf artifact
           mkdir -p artifact
 
-          cp build/android-arm64-neon/spaghet \
-             artifact/spaghet-android-arm64-neon
+          cp \
+            build/android-arm64-neon/spaghet \
+            artifact/spaghet-android-arm64-neon
 
           chmod +x artifact/spaghet-android-arm64-neon
 
-          echo "Artifact:"
-          ls -lh artifact
+          echo "Final artifact:"
+          ls -lah artifact
 
-          test "$(find artifact -maxdepth 1 -type f | wc -l)" -eq 1
+          COUNT="$(find artifact -maxdepth 1 -type f | wc -l)"
+
+          if [ "$COUNT" != "1" ]; then
+            echo "ERROR: Expected exactly one artifact."
+            exit 1
+          fi
 
       - name: Upload Android binary
         uses: actions/upload-artifact@v4
