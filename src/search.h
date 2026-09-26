@@ -7,7 +7,6 @@
 #include "movegen.h"
 #include "nnue_misc.h"
 #include "transposition_table.h"
-#include "threads.h"
 #include "see.h"
 #include "movelist.h"
 #include "search_stack.h"
