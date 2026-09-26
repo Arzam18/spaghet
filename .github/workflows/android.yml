@@ -4,75 +4,49 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "src/**"
-      - "Makefile"
-      - ".github/workflows/android.yml"
+      - 'src/**'
+      - '.github/workflows/android.yml'
+      - 'Makefile'
 
 jobs:
   build:
-    name: Android ARM64 NEON
+    name: Build Android ARM64 NEON
     runs-on: ubuntu-24.04
 
     env:
-      API_LEVEL: "24"
-      NDK_VERSION: "29.0.14206865"
-      EVALFILE: "master0002.bin"
+      API_LEVEL: '24'
+      NDK_VERSION: '29.0.14206865'
+      EVALFILE: 'master0002.bin'
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ============================================================
-      # ANDROID SDK / NDK
-      # ============================================================
-
-      - name: Locate Android SDK
+      - name: Locate Android NDK
         shell: bash
         run: |
           set -eux
 
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          NDK="$SDK/ndk/$NDK_VERSION"
 
           test -d "$SDK"
+          test -d "$NDK"
 
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-
-          echo "Android SDK: $SDK"
-
-
-      - name: Select NDK
-        shell: bash
-        run: |
-          set -eux
-
-          NDK="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
-
-          echo "Installed NDKs:"
-          find "$ANDROID_SDK_ROOT/ndk" \
-            -mindepth 1 \
-            -maxdepth 1 \
-            -type d \
-            -printf '%f\n' \
-            | sort -V || true
-
-          test -d "$NDK"
-
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
 
-          echo "Using NDK: $NDK"
+          echo "Android SDK: $SDK"
+          echo "Android NDK: $NDK"
 
-
-      - name: Locate ARM64 compiler
+      - name: Select ARM64 Clang
         shell: bash
         run: |
           set -eux
 
           TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
           CXX="$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang++"
 
           test -x "$CXX"
@@ -82,297 +56,33 @@ jobs:
 
           "$CXX" --version
 
-
-      # ============================================================
-      # NNUE
-      # ============================================================
-
       - name: Download NNUE
         shell: bash
         run: |
           set -eux
 
-          if [ ! -f "$EVALFILE" ]; then
+          if [ ! -s "$EVALFILE" ]; then
             wget -O "$EVALFILE" \
               "https://github.com/yl25946/vault/raw/main/$EVALFILE"
           fi
 
           test -s "$EVALFILE"
-
           ls -lh "$EVALFILE"
 
-
-      # ============================================================
-      # SEARCHER INCLUDE FIX
-      # ============================================================
-
-      - name: Fix Searcher ThreadManager include order
+      - name: Build Spaghet
         shell: bash
         run: |
           set -eux
 
-          python3 <<'PY'
-          from pathlib import Path
-
-          h_path = Path("src/search.h")
-          cpp_path = Path("src/search.cpp")
-
-          h = h_path.read_text()
-          cpp = cpp_path.read_text()
-
-          # Remove circular include.
-          h = h.replace('#include "threads.h"\n', '')
-
-          # ThreadManager is only needed as a declaration here.
-          if 'class ThreadManager;' not in h:
-              marker = 'class Searcher\n'
-
-              if marker not in h:
-                  raise SystemExit(
-                      "ERROR: Could not find Searcher declaration."
-                  )
-
-              h = h.replace(
-                  marker,
-                  'class ThreadManager;\n\n' + marker,
-                  1
-              )
-
-          # search.cpp needs the complete definition.
-          if '#include "threads.h"' not in cpp:
-              marker = '#include "search.h"\n'
-
-              if marker in cpp:
-                  cpp = cpp.replace(
-                      marker,
-                      marker + '#include "threads.h"\n',
-                      1
-                  )
-              else:
-                  cpp = '#include "threads.h"\n' + cpp
-
-          h_path.write_text(h)
-          cpp_path.write_text(cpp)
-
-          print("Include order fixed.")
-          PY
-
-
-      # ============================================================
-      # ARM64 NEON SIMD
-      # ============================================================
-
-      - name: Add native ARM64 NEON SIMD
-        shell: bash
-        run: |
-          set -eux
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          p = Path("src/simd.h")
-          s = p.read_text()
-
-          # --------------------------------------------------------
-          # Include arm_neon.h instead of immintrin.h on ARM.
-          # --------------------------------------------------------
-
-          old = """#if defined(USE_SIMD)
-          #include <immintrin.h>
-          #endif"""
-
-          new = """#if defined(USE_NEON)
-          #include <arm_neon.h>
-          #elif defined(USE_SIMD)
-          #include <immintrin.h>
-          #endif"""
-
-          if old in s:
-              s = s.replace(old, new, 1)
-
-          # --------------------------------------------------------
-          # Insert NEON implementation.
-          # --------------------------------------------------------
-
-          if "#if defined(USE_NEON)" not in s:
-
-              marker = "#if defined(USE_AVX512)"
-
-              if marker not in s:
-                  raise SystemExit(
-                      "ERROR: Could not find USE_AVX512 block."
-                  )
-
-              neon = r'''
-          #if defined(USE_NEON)
-
-          using vepi16 = int16x8_t;
-          using vepi32 = int32x4_t;
-
-          inline vepi16 zero_epi16()
-          {
-              return vdupq_n_s16(0);
-          }
-
-          inline vepi32 zero_epi32()
-          {
-              return vdupq_n_s32(0);
-          }
-
-          inline vepi16 load_epi16(
-              const int16_t *memory_address
-          )
-          {
-              return vld1q_s16(memory_address);
-          }
-
-          inline vepi32 load_epi32(
-              const int32_t *memory_address
-          )
-          {
-              return vld1q_s32(memory_address);
-          }
-
-          inline vepi16 set_epi16(int num)
-          {
-              return vdupq_n_s16(
-                  static_cast<int16_t>(num)
-              );
-          }
-
-          inline vepi32 set_epi32(int num)
-          {
-              return vdupq_n_s32(
-                  static_cast<int32_t>(num)
-              );
-          }
-
-          inline vepi16 add_epi16(
-              vepi16 v1,
-              vepi16 v2
-          )
-          {
-              return vaddq_s16(v1, v2);
-          }
-
-          inline vepi32 add_epi32(
-              vepi32 v1,
-              vepi32 v2
-          )
-          {
-              return vaddq_s32(v1, v2);
-          }
-
-          inline vepi16 multiply_epi16(
-              vepi16 v1,
-              vepi16 v2
-          )
-          {
-              return vmulq_s16(v1, v2);
-          }
-
-          inline vepi32 multiply_add_epi16(
-              vepi16 v1,
-              vepi16 v2
-          )
-          {
-              const int32x4_t lo =
-                  vmull_s16(
-                      vget_low_s16(v1),
-                      vget_low_s16(v2)
-                  );
-
-              const int32x4_t hi =
-                  vmull_s16(
-                      vget_high_s16(v1),
-                      vget_high_s16(v2)
-                  );
-
-              return vpaddq_s32(lo, hi);
-          }
-
-          inline vepi16 clip(
-              vepi16 vector,
-              int L1Q
-          )
-          {
-              const vepi16 zero =
-                  vdupq_n_s16(0);
-
-              const vepi16 maxv =
-                  vdupq_n_s16(
-                      static_cast<int16_t>(L1Q)
-                  );
-
-              return vminq_s16(
-                  vmaxq_s16(vector, zero),
-                  maxv
-              );
-          }
-
-          inline int reduce_add_epi32(
-              vepi32 vector
-          )
-          {
-              int32x2_t sum =
-                  vadd_s32(
-                      vget_low_s32(vector),
-                      vget_high_s32(vector)
-                  );
-
-              sum = vpadd_s32(sum, sum);
-
-              return vget_lane_s32(sum, 0);
-          }
-
-          #elif defined(USE_AVX512)
-          '''
-
-              s = s.replace(
-                  marker,
-                  neon,
-                  1
-              )
-
-          p.write_text(s)
-
-          print("NEON backend installed.")
-          PY
-
-          echo
-          echo "SIMD backend:"
-          grep -n -E \
-            'USE_NEON|USE_AVX512|USE_AVX2|arm_neon|immintrin' \
-            src/simd.h || true
-
-
-      # ============================================================
-      # COMPILE
-      #
-      # NO -Werror.
-      #
-      # Warnings cannot terminate this compilation.
-      # ============================================================
-
-      - name: Compile Android ARM64 NEON
-        shell: bash
-        run: |
-          set +e
-
-          mkdir -p build/android-arm64-neon
-
-          LOG="build/android-arm64-neon/build.log"
-
-          echo "=========================================="
-          echo "COMPILING SPAGHET"
-          echo "=========================================="
-          echo
+          mkdir -p build
 
           "$CXX" \
             -O3 \
             -funroll-loops \
             -flto \
             -fno-exceptions \
+            -fuse-ld=lld \
+            -static-libstdc++ \
             -std=c++20 \
             -DNDEBUG \
             -Wall \
@@ -392,115 +102,28 @@ jobs:
             -ffunction-sections \
             src/*.cpp \
             -pthread \
-            -o build/android-arm64-neon/spaghet \
-            > "$LOG" 2>&1
+            -o build/spaghet-android-arm64-neon
 
-          STATUS=$?
+          chmod +x build/spaghet-android-arm64-neon
 
-          echo
-          echo "=========================================="
-          echo "COMPILER EXIT CODE: $STATUS"
-          echo "=========================================="
-
-          if [ "$STATUS" -ne 0 ]; then
-
-            echo
-            echo "=========================================="
-            echo "REAL ERRORS ONLY"
-            echo "=========================================="
-
-            grep -n \
-              -E 'error:|fatal error:|undefined reference|ld\.lld:' \
-              "$LOG" \
-              || true
-
-            echo
-            echo "=========================================="
-            echo "CONTEXT AROUND ERRORS"
-            echo "=========================================="
-
-            grep -n \
-              -B 3 -A 8 \
-              -E 'error:|fatal error:|undefined reference|ld\.lld:' \
-              "$LOG" \
-              || true
-
-            echo
-            echo "=========================================="
-            echo "LAST 80 LINES"
-            echo "=========================================="
-
-            tail -n 80 "$LOG"
-
-            exit "$STATUS"
-          fi
-
-          echo
-          echo "=========================================="
-          echo "BUILD SUCCESSFUL"
-          echo "=========================================="
-
-          ls -lh build/android-arm64-neon/spaghet
-
-
-      # ============================================================
-      # VERIFY ARM64
-      # ============================================================
-
-      - name: Verify ARM64 binary
+      - name: Verify Android ARM64 binary
         shell: bash
         run: |
           set -eux
 
-          BINARY="build/android-arm64-neon/spaghet"
+          BINARY="build/spaghet-android-arm64-neon"
 
-          echo "FILE:"
           file "$BINARY"
-
-          echo
-          echo "ELF HEADER:"
           readelf -h "$BINARY"
 
-          file "$BINARY" \
-            | grep -Ei 'ARM aarch64|ARM64|AArch64'
-
-          readelf -h "$BINARY" \
-            | grep 'Class:' \
-            | grep 'ELF64'
-
-          readelf -h "$BINARY" \
-            | grep 'Machine:' \
-            | grep -Ei 'AArch64|ARM'
+          file "$BINARY" | grep -Ei 'ARM aarch64|ARM64|AArch64'
+          readelf -h "$BINARY" | grep 'Class:' | grep 'ELF64'
+          readelf -h "$BINARY" | grep 'Machine:' | grep -Ei 'AArch64|ARM'
 
           test -x "$BINARY"
+          test -s "$BINARY"
 
-
-      # ============================================================
-      # VERIFY EMBEDDED NNUE
-      # ============================================================
-
-      - name: Verify embedded NNUE
-        shell: bash
-        run: |
-          set -eux
-
-          BINARY="build/android-arm64-neon/spaghet"
-
-          ls -lh "$BINARY"
-
-          echo
-          echo "NNUE symbols:"
-          readelf -s "$BINARY" \
-            | grep -E \
-              'gEVALData|gEVALEnd|gEVALSize' \
-            || true
-
-
-      # ============================================================
-      # ONE BINARY ONLY
-      # ============================================================
-
-      - name: Prepare artifact
+      - name: Prepare single-file artifact
         shell: bash
         run: |
           set -eux
@@ -508,30 +131,13 @@ jobs:
           rm -rf artifact
           mkdir -p artifact
 
-          cp \
-            build/android-arm64-neon/spaghet \
+          cp build/spaghet-android-arm64-neon \
             artifact/spaghet-android-arm64-neon
 
-          chmod +x \
-            artifact/spaghet-android-arm64-neon
+          chmod +x artifact/spaghet-android-arm64-neon
 
-          echo
-          echo "Artifact:"
-          ls -lah artifact
-
-          COUNT="$(
-            find artifact \
-              -maxdepth 1 \
-              -type f \
-              | wc -l
-          )"
-
-          test "$COUNT" -eq 1
-
-
-      # ============================================================
-      # UPLOAD
-      # ============================================================
+          test "$(find artifact -maxdepth 1 -type f | wc -l)" -eq 1
+          ls -lh artifact
 
       - name: Upload Android binary
         uses: actions/upload-artifact@v4
