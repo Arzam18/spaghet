@@ -2,11 +2,47 @@
 
 #include "defs.h"
 
-#if defined(USE_SIMD)
+#if defined(USE_NEON)
+#include <arm_neon.h>
+#elif defined(USE_SIMD)
 #include <immintrin.h>
 #endif
 
-#if defined(USE_AVX512)
+#if defined(USE_NEON)
+using vepi16 = int16x8_t;
+using vepi32 = int32x4_t;
+
+inline vepi16 zero_epi16() { return vdupq_n_s16(0); }
+inline vepi32 zero_epi32() { return vdupq_n_s32(0); }
+inline vepi16 load_epi16(const int16_t *memory_address) { return vld1q_s16(memory_address); }
+inline vepi32 load_epi32(const int32_t *memory_address) { return vld1q_s32(memory_address); }
+inline vepi16 set_epi16(int num) { return vdupq_n_s16(static_cast<int16_t>(num)); }
+inline vepi32 set_epi32(int num) { return vdupq_n_s32(static_cast<int32_t>(num)); }
+inline void store_epi16(void *memory_address, vepi16 vector) { vst1q_s16(reinterpret_cast<int16_t *>(memory_address), vector); }
+inline vepi16 add_epi16(vepi16 v1, vepi16 v2) { return vaddq_s16(v1, v2); }
+inline vepi32 add_epi32(vepi32 v1, vepi32 v2) { return vaddq_s32(v1, v2); }
+inline vepi16 multiply_epi16(vepi16 v1, vepi16 v2) { return vmulq_s16(v1, v2); }
+// Equivalent to the x86 madd operation: adjacent signed int16 products are summed into int32 lanes.
+inline vepi32 multiply_add_epi16(vepi16 v1, vepi16 v2)
+{
+    const int32x4_t lo = vmull_s16(vget_low_s16(v1), vget_low_s16(v2));
+    const int32x4_t hi = vmull_s16(vget_high_s16(v1), vget_high_s16(v2));
+    return vpaddq_s32(lo, hi);
+}
+inline vepi16 clip(vepi16 vector, int L1Q)
+{
+    const vepi16 zero = vdupq_n_s16(0);
+    const vepi16 maxv = vdupq_n_s16(static_cast<int16_t>(L1Q));
+    return vminq_s16(vmaxq_s16(vector, zero), maxv);
+}
+inline int reduce_add_epi32(vepi32 vector)
+{
+    int32x2_t sum = vadd_s32(vget_low_s32(vector), vget_high_s32(vector));
+    sum = vpadd_s32(sum, sum);
+    return vget_lane_s32(sum, 0);
+}
+
+#elif defined(USE_AVX512)
 using vepi16 = __m512i;
 using vepi32 = __m512i;
 
